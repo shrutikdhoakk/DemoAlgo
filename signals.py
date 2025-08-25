@@ -8,6 +8,7 @@ from typing import Iterator, List, Optional, Callable, Any
 
 import pandas as pd
 from trade_signal import TradeSignal
+from performance import PerformanceTracker  # <-- NEW
 
 
 # ---------- helpers ----------
@@ -173,7 +174,10 @@ def _make_yfinance_fetcher() -> Callable[[str], pd.DataFrame]:
 
 
 # ---------- main generator ----------
-def generate_signals(symbols_or_cfg: Optional[Any] = None) -> Iterator[TradeSignal]:
+def generate_signals(
+    symbols_or_cfg: Optional[Any] = None,
+    tracker: Optional[PerformanceTracker] = None,  # <-- NEW
+) -> Iterator[TradeSignal]:
     """
     Accepts either:
       - a list of symbols, OR
@@ -249,11 +253,18 @@ def generate_signals(symbols_or_cfg: Optional[Any] = None) -> Iterator[TradeSign
         syms = ["RELIANCE"]
         print(f"[signals] Using default symbols: {syms}", flush=True)
 
+    # Ensure we have a tracker
+    tracker = tracker or PerformanceTracker()  # <-- NEW
+
     # ---- immediate demo trades (prove path) ----
     if ALWAYS_TRADE and syms:
-        yield TradeSignal(symbol=syms[0], side="BUY", quantity=1)
+        ts = TradeSignal(symbol=syms[0], side="BUY", quantity=1)
+        tracker.record(ts, 0.0)  # <-- NEW
+        yield ts
         time.sleep(5)
-        yield TradeSignal(symbol=syms[0], side="SELL", quantity=1)
+        ts = TradeSignal(symbol=syms[0], side="SELL", quantity=1)
+        tracker.record(ts, 0.0)  # <-- NEW
+        yield ts
 
     # ---- data fetcher selection ----
     if OFFLINE_MODE:
@@ -278,6 +289,7 @@ def generate_signals(symbols_or_cfg: Optional[Any] = None) -> Iterator[TradeSign
         total_capital=TOTAL_CAPITAL,         # total capital
         max_invested=MAX_INVESTED,           # cap deployed capital
         timezone="Asia/Kolkata",
+        performance_tracker=tracker,         # <-- NEW
     )
 
     yield from strat.generate_signals()

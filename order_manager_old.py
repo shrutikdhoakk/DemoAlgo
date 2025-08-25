@@ -1,11 +1,12 @@
 # order_manager_old.py
 """
-OrderManager (old) — patched
+OrderManager (updated for swing/risk/perf)
 
-- No dependency on RiskEngine.check(); uses it if present, else a safe default.
+- Integrates tightly with RiskEngine (prefer allow_order(); fallback to pre_trade_checks()).
+- Records fills in PerformanceTracker.
 - Accepts dict or TradeSignal dataclass/object.
-- In SIM mode: skip KiteTicker; do paper fills with realistic prices.
-- In LIVE mode: optionally start KiteTicker (guarded by env/cfg) and place real orders.
+- SIM mode: paper fills with realistic prices (tick -> Yahoo -> fallback) and updates exposures.
+- LIVE mode: optional KiteTicker and real orders (unchanged semantics).
 - Optional market-hours gate via MARKET_HOURS_ONLY=1 (IST 09:15–15:30).
 - Respects DISABLE_TICKER=1 so Twisted signal handlers are never touched.
 """
@@ -15,7 +16,7 @@ from __future__ import annotations
 import os
 import time
 from dataclasses import dataclass, is_dataclass, asdict
-from typing import Dict, Optional, Any
+from typing import Dict, Optional, Any, Tuple
 from datetime import datetime, time as dtime
 from zoneinfo import ZoneInfo
 
@@ -23,6 +24,8 @@ from kiteconnect import KiteConnect, KiteTicker
 
 from config import AppConfig
 from risk_engine import RiskEngine
+from performance import PerformanceTracker
+from trade_signal import TradeSignal
 from utils import setup_logger
 
 
@@ -38,12 +41,19 @@ class OrderSlice:
 
 
 class OrderManager:
-    def __init__(self, cfg: AppConfig, risk_engine: RiskEngine, kite: KiteConnect) -> None:
+    def __init__(
+        self,
+        cfg: AppConfig,
+        risk_engine: RiskEngine,
+        kite: KiteConnect,
+        tracker: Optional[PerformanceTracker] = None,
+    ) -> None:
         self.cfg = cfg
         self.risk = risk_engine
         self.kite = kite
-        self.logger = setup_logger("order_manager", "logs/order_manager.log")
+        self.tracker = tracker or PerformanceTracker()
 
+        self.logger = setup_logger("order_manager", "logs/order_manager.log")
         self._quotes: Dict[str, Dict] = {}
         self.ticker: Optional[KiteTicker] = None
 
@@ -65,22 +75,28 @@ class OrderManager:
     def handle_signal(self, sig_in: Any) -> None:
         """
         Accepts dict or TradeSignal-like object and routes to SIM or LIVE path.
-        Applies risk checks:
-          - risk.check(sig) if present
-          - else risk.validate(sig) if present
-          - else built-in sanity checks
+        Applies risk checks using RiskEngine (allow_order -> pre_trade_checks -> fallback).
         """
         sig = self._normalize_sig(sig_in)
+        symbol, side, qty, otype, price = (
+            sig["symbol"], sig["side"], int(sig["qty"]), sig["type"], sig.get("price")
+        )
 
-        if not self._risk_check(sig):
-            self.logger.warning(f"Signal rejected by risk check: {sig}")
+        # Fetch LTP for checks/fills when price not provided
+        ltp = self._last_price(symbol) or None
+        if ltp is None or not self._is_pos_float(ltp):
+            # pull a SIM price (tick->Yahoo->fallback), but do not mutate cache unless used
+            ltp = self._get_sim_price(symbol)
+
+        allowed, reason, signed_notional = self._risk_gate(sig, ltp)
+        if not allowed:
+            self.logger.warning(f"Signal rejected by risk gate: {reason} | {sig}")
             return
 
         env = str(self.cfg.env).upper()
         if env == "SIM":
-            self._paper_trade(sig)
+            self._paper_trade(sig, fill_price=price if self._is_pos_float(price) else ltp)
         else:
-            # Market-hours gate for LIVE if requested
             if self._market_hours_only and not self._is_market_open_ist():
                 self.logger.warning(f"Market closed; dropping LIVE signal: {sig}")
                 return
@@ -91,12 +107,49 @@ class OrderManager:
         try:
             if self.ticker is not None:
                 try:
-                    # Best-effort close if available in your kiteconnect version
                     self.ticker.close()
                 except Exception:
                     pass
         except Exception:
             self.logger.exception("Error stopping ticker")
+
+    # ---------------- Risk plumbing ----------------
+
+    def _risk_gate(self, sig: Dict[str, Any], ltp: float) -> Tuple[bool, str, float]:
+        """
+        Prefer RiskEngine.allow_order(); fallback to pre_trade_checks(); else built-in checks.
+        Returns (allowed, reason, signed_notional).
+        """
+        symbol = sig["symbol"]
+        side = sig["side"]
+        qty = int(sig["qty"])
+        limit_price = float(sig.get("price") or ltp or 0.0)
+
+        # Preferred: allow_order
+        if hasattr(self.risk, "allow_order"):
+            try:
+                # Pass check_positions_cap if available on cfg
+                cap = getattr(self.cfg, "max_positions", None)
+                ok, reason, signed_notional = self.risk.allow_order(
+                    symbol=symbol, side=side, qty=qty, ltp=ltp, limit_price=limit_price,
+                    check_positions_cap=cap
+                )
+                return bool(ok), str(reason or ""), float(signed_notional)
+            except Exception as e:
+                self.logger.warning(f"risk.allow_order raised {e}; falling back to pre_trade_checks().")
+
+        # Next: pre_trade_checks
+        if hasattr(self.risk, "pre_trade_checks"):
+            try:
+                signed_notional = self._signed_notional(side, ltp, qty)
+                ok, reason = self.risk.pre_trade_checks(symbol, signed_notional, ltp, limit_price)
+                return bool(ok), str(reason or ""), float(signed_notional)
+            except Exception as e:
+                self.logger.warning(f"risk.pre_trade_checks raised {e}; falling back to built-in checks.")
+
+        # Built-in minimal checks
+        ok = self._builtin_checks(sig)
+        return (ok, "" if ok else "basic validation failed", self._signed_notional(side, ltp, qty))
 
     # ---------------- Internals ----------------
 
@@ -116,7 +169,7 @@ class OrderManager:
                 if hasattr(sig_in, k):
                     d[k] = getattr(sig_in, k)
 
-        symbol = d.get("symbol")
+        symbol = self._to_nse_symbol(d.get("symbol"))
         side = str(d.get("side", "BUY")).upper()
         qty = int(d.get("qty") or d.get("quantity") or 0)
         price = d.get("price", d.get("limit_price"))
@@ -125,23 +178,7 @@ class OrderManager:
 
         return {"symbol": symbol, "side": side, "qty": qty, "type": otype, "price": price}
 
-    def _risk_check(self, sig: Dict[str, Any]) -> bool:
-        """
-        Use RiskEngine.check/validate if available; otherwise run built-in sanity checks.
-        """
-        # Use project-defined checks if present
-        if hasattr(self.risk, "check"):
-            try:
-                return bool(self.risk.check(sig))
-            except Exception as e:
-                self.logger.warning(f"risk.check raised {e}; falling back to default checks.")
-        elif hasattr(self.risk, "validate"):
-            try:
-                return bool(self.risk.validate(sig))
-            except Exception as e:
-                self.logger.warning(f"risk.validate raised {e}; falling back to default checks.")
-
-        # Built-in minimal checks
+    def _builtin_checks(self, sig: Dict[str, Any]) -> bool:
         symbol = sig.get("symbol")
         side = sig.get("side")
         qty = sig.get("qty")
@@ -165,8 +202,26 @@ class OrderManager:
                 return False
             if p <= 0:
                 return False
-
         return True
+
+    @staticmethod
+    def _to_nse_symbol(symbol: Any) -> str:
+        """Normalize 'NSE:RELIANCE'/'reliance' -> 'RELIANCE'."""
+        if symbol is None:
+            return ""
+        return str(symbol).split(":")[-1].strip().upper()
+
+    @staticmethod
+    def _signed_notional(side: str, px: float, qty: int) -> float:
+        sign = 1.0 if str(side).upper() == "BUY" else -1.0
+        return sign * float(px or 0.0) * int(qty or 0)
+
+    @staticmethod
+    def _is_pos_float(x: Any) -> bool:
+        try:
+            return float(x) > 0.0
+        except Exception:
+            return False
 
     # ---------- SIM pricing helpers ----------
 
@@ -186,14 +241,14 @@ class OrderManager:
 
         # 1) last tick (if any)
         lp = self._last_price(symbol)
-        if isinstance(lp, (int, float)) and lp > 0:
+        if self._is_pos_float(lp):
             px = float(lp)
             self._sim_price_cache[symbol] = px
             return px
 
         # 2) Yahoo last close (best-effort, cache the result)
         try:
-            import yfinance as yf  # optional
+            import yfinance as yf  # optional dependency
             import pandas as pd
             ticker = self._yahoo_symbol(symbol)
             df = yf.download(ticker, period="5d", interval="1d", auto_adjust=False, progress=False)
@@ -222,7 +277,7 @@ class OrderManager:
                     s = pd.to_numeric(s, errors="coerce")
 
                 last_val = s.iloc[-1]
-                if isinstance(last_val, pd.Series):
+                if hasattr(last_val, "iloc"):  # guard if it's a Series
                     last_val = last_val.iloc[0]
                 px = float(last_val)
 
@@ -237,20 +292,37 @@ class OrderManager:
         self._sim_price_cache[symbol] = px
         return px
 
-    def _paper_trade(self, sig: Dict) -> None:
-        # SIM execution: use provided price for LIMIT; else get a realistic SIM price
+    # ---------- SIM & LIVE execution ----------
+
+    def _paper_trade(self, sig: Dict, fill_price: float) -> None:
+        """
+        SIM execution: assume full fill immediately at `fill_price`.
+        - Records trade in PerformanceTracker
+        - Updates RiskEngine exposures
+        """
         symbol = sig["symbol"]
         side = sig["side"].upper()
         qty = int(sig["qty"])
+        px = float(fill_price)
 
-        price = sig.get("price")
-        if price is None or float(price) <= 0:
-            price = self._get_sim_price(symbol)
+        # Tracker record
+        try:
+            self.tracker.record(TradeSignal(symbol=symbol, side=side, quantity=qty), px)
+        except Exception:
+            pass
 
-        self.logger.info(f"[SIM] {side} {qty} {symbol} @ {float(price):.2f}")
+        # Exposure update (signed notional, signed qty)
+        try:
+            signed_notional = self._signed_notional(side, px, qty)
+            signed_qty = qty if side == "BUY" else -qty
+            self.risk.update_position(symbol, signed_notional, signed_qty)
+        except Exception:
+            pass
+
+        self.logger.info(f"[SIM] {side} {qty} {symbol} @ {px:.2f}")
 
     def _live_trade(self, sig: Dict) -> None:
-        side = sig["side"]
+        side = sig["side"].upper()
         symbol = sig["symbol"]
         qty = int(sig["qty"])
         otype = sig.get("type", "MARKET").upper()
@@ -262,11 +334,12 @@ class OrderManager:
             transaction_type=side,
             quantity=qty,
             order_type=otype,
-            product="CNC",   # adjust if you use CNC/NRML/MIS
+            product="CNC",   # adjust if needed (CNC/NRML/MIS)
         )
         if otype == "LIMIT":
             if price is None:
-                raise ValueError("LIMIT order requires 'price'")
+                self.logger.error("LIMIT order requires 'price'; dropping.")
+                return
             params["price"] = float(price)
 
         self.logger.info(f"[LIVE] Placing order: {params}")
@@ -275,6 +348,8 @@ class OrderManager:
             self.logger.info(f"Order placed: {resp}")
         except Exception as e:
             self.logger.exception(f"Order placement failed: {e}")
+
+    # ---------- Market data helpers ----------
 
     def _last_price(self, symbol: str) -> Optional[float]:
         q = self._quotes.get(symbol)
@@ -357,7 +432,6 @@ class OrderManager:
         self.ticker.on_error = on_error
 
         # Important: call connect(threaded=True) from the MAIN thread.
-        # This avoids Twisted trying to install signal handlers in a worker thread.
         try:
             self.ticker.connect(threaded=True, disable_ssl_verification=False)
             self.logger.info("KiteTicker started (threaded=True).")

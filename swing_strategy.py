@@ -21,8 +21,8 @@ try:
 except ImportError:
     _yf = None
 
-from .trade_signal import TradeSignal
-
+from trade_signal import TradeSignal
+from performance import PerformanceTracker  # NEW
 
 
 # -------------- helpers --------------
@@ -98,7 +98,7 @@ def _pick_col(df: _pd.DataFrame, name: str) -> _pd.Series:
 
         # Search any level
         for col in df.columns:
-            parts = col if isinstance(col, tuple) else (col,)
+            parts = col if isinstance(col, tuple) else (col, )
             if any(str(p).lower() == lname for p in parts):
                 s = df[col]
                 if isinstance(s, _pd.DataFrame):
@@ -225,6 +225,7 @@ class SwingStrategy:
         total_capital: float = 10000.0,           # informational
         max_invested: float = 5000.0,             # hard notional cap in market
         regime_rsi_min: float = 50.0,             # index RSI threshold
+        performance_tracker: Optional[PerformanceTracker] = None,  # NEW
     ) -> None:
         self.symbols = symbols
         self.data_fetcher = data_fetcher or self._default_fetcher
@@ -237,6 +238,8 @@ class SwingStrategy:
         self.total_capital = float(total_capital)
         self.max_invested = float(max_invested)
         self.regime_rsi_min = float(regime_rsi_min)
+
+        self.tracker = performance_tracker or PerformanceTracker()  # NEW
 
         # position state: sym -> {"qty", "stop_price", "target_price", "last_close"}
         self._open_positions: Dict[str, Dict[str, float]] = {}
@@ -325,6 +328,15 @@ class SwingStrategy:
             last_c = float(pos.get("last_close", 0.0))
             total += qty * last_c
         return float(total)
+
+    # -------- tracker helper --------
+
+    def _record_trade(self, symbol: str, side: str, qty: int, price: float) -> None:
+        """Send trade to tracker safely."""
+        try:
+            self.tracker.record(TradeSignal(symbol=symbol, side=side, quantity=int(qty)), float(price))
+        except Exception:
+            pass
 
     # -------- entry/exit logic --------
 
@@ -462,6 +474,9 @@ class SwingStrategy:
 
                     if self._evaluate_exit(df_n, pos):
                         qty = int(pos["qty"])
+                        # record SELL with current close (best available)
+                        sell_price = float(pos.get("last_close", c if not _np.isnan(c) else 0.0))
+                        self._record_trade(sym, "SELL", qty, sell_price)  # NEW
                         yield TradeSignal(symbol=sym, side="SELL", quantity=qty)
                         self._open_positions.pop(sym, None)
 
@@ -469,6 +484,8 @@ class SwingStrategy:
                 if not self._is_risk_on():
                     for sym, pos in list(self._open_positions.items()):
                         qty = int(pos["qty"])
+                        price = float(pos.get("last_close", 0.0))
+                        self._record_trade(sym, "SELL", qty, price)  # NEW
                         yield TradeSignal(symbol=sym, side="SELL", quantity=qty)
                         self._open_positions.pop(sym, None)
                 else:
@@ -520,6 +537,8 @@ class SwingStrategy:
                                     "target_price": float(target),
                                     "last_close": float(price),
                                 }
+                                # record BUY at entry price
+                                self._record_trade(sym, "BUY", int(qty), float(price))  # NEW
                                 yield TradeSignal(symbol=sym, side="BUY", quantity=int(qty))
 
                                 remaining_budget -= notional

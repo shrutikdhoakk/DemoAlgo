@@ -1,26 +1,65 @@
-env: LIVE         # SIM or LIVE
+# ==============================
+# Runtime mode
+# ==============================
+env: LIVE            # SIM or LIVE (OrderManager uses this)
 
-
+# ==============================
+# Broker (Zerodha)
+# ==============================
 broker:
   name: "Zerodha"
-  api_key: ""         # keep empty here; put real value in .env
-  api_secret: ""      # keep empty here; put real value in .env
-  rate_limit_per_sec: 3
+  api_key: ""        # keep empty in repo; set KITE_API_KEY in .env for LIVE
+  api_secret: ""     # keep empty in repo; set via your OAuth app
+  rate_limit_per_sec: 3   # RiskEngine rate limiter
 
+# Optional: subscribe tokens for KiteTicker (LIVE only, if DISABLE_TICKER != 1)
+instrument_tokens: []     # e.g., [738561, 779521, ...]
+
+# ==============================
+# Market data / Universe
+# ==============================
 marketdata:
-  source: "broker_ws"
-  symbols: []         # <- leave empty; we'll load universe from CSV via env
+  source: "broker_ws"     # "broker_ws" (LIVE) or "yfinance" (SIM). DISABLE_TICKER=1 to skip WS
+  symbols: []             # leave empty to let signals/backtest load from CSV via env
 
+# ==============================
+# Strategy / Portfolio caps
+# (These mirror the env knobs our code reads; helpful for UIs/scripts)
+# ==============================
+strategy:
+  max_positions: 5        # SwingStrategy cap (also used by RiskEngine.allow_order seats check)
+  total_capital: 10000    # informational / SIM sizing
+  max_invested: 5000      # notional cap deployed
+  per_trade_risk: 1000    # ATR-based risk sizing (≈ risk per position)
+
+# ==============================
+# Regime / Filters (matches SwingStrategy defaults)
+# ==============================
+regime:
+  enabled: true           # REGIME_FILTER (if you also set env REGIME_FILTER=1)
+  rsi_min: 50.0
+
+# ==============================
+# Risk controls (RiskEngine)
+# ==============================
 risk:
-  max_portfolio_value: 500000
-  per_symbol_cap: 100000
-  sector_cap_pct: 30
-  min_adv_pct: 0.5
-  price_band_buffer_bps: 30
+  max_portfolio_value: 500000    # rupee notional cap across symbols
+  per_symbol_cap: 100000         # rupee notional per symbol
+  price_band_buffer_bps: 30      # limit price must be within ±30 bps of LTP
 
+  # The following are kept for future extensions / analytics (not enforced in current code)
+  sector_cap_pct: 30             # placeholder
+  min_adv_pct: 0.5               # placeholder
+
+# ==============================
+# Stops / trailing (kept for reference; live strategy trails by ATR internally)
+# ==============================
 stops:
   atr_multiple_init: 2.0
   atr_multiple_trail: 1.5
 
+# ==============================
+# Monitoring
+# ==============================
 monitoring:
   alert_email: "shrutikdhoak01@gmail.com"

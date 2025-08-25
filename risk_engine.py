@@ -10,31 +10,41 @@ portfolio exposures in memory for real-time supervision.
 from __future__ import annotations
 
 import math
-from typing import Dict, Tuple
+from typing import Dict, Tuple, Optional
 
 from config import AppConfig
 from utils import RateLimiter
+
+
+def _to_float(x) -> float:
+    try:
+        return float(x)
+    except Exception:
+        return 0.0
+
+
+def _to_int(x) -> int:
+    try:
+        return int(x)
+    except Exception:
+        return 0
 
 
 class RiskEngine:
     """
     Pre-trade risk engine enforcing SEBI-aligned controls.
 
-    The engine maintains two exposure maps:
-    - `exposures_notional` stores the rupee notional exposure per symbol.
-    - `positions_qty` stores the net quantity position per symbol.
+    Maps maintained in-memory:
+    - `exposures_notional`: rupee notional per symbol (signed)
+    - `positions_qty`: net quantity per symbol (signed)
     """
 
     def __init__(self, config: AppConfig) -> None:
         self.cfg = config
-        # rupee exposures keyed by symbol
         self.exposures_notional: Dict[str, float] = {}
-        # net quantity positions keyed by symbol
         self.positions_qty: Dict[str, int] = {}
-        # order-to-trade ratio tracking
         self.order_count: int = 0
         self.trade_count: int = 0
-        # simple rate limiter based on API limits
         self.rate_limiter = RateLimiter(
             max_calls=self.cfg.broker.rate_limit_per_sec,
             period=1.0
@@ -45,20 +55,13 @@ class RiskEngine:
     # ------------------------------------------------------------------ #
     def update_position(self, symbol: str, notional: float, qty: int) -> None:
         """
-        Update internal exposures after a fill.
+        Update internal exposures after a *fill*.
 
-        notional: signed rupee notional (qty × price). + for buy, - for sell.
+        notional: signed rupee amount (qty × price). + for buy, - for sell.
         qty: signed shares. + for buy, - for sell.
         """
-        try:
-            n = float(notional)
-        except Exception:
-            n = 0.0
-        try:
-            q = int(qty)
-        except Exception:
-            q = 0
-
+        n = _to_float(notional)
+        q = _to_int(qty)
         self.exposures_notional[symbol] = float(self.exposures_notional.get(symbol, 0.0) + n)
         self.positions_qty[symbol] = int(self.positions_qty.get(symbol, 0) + q)
 
@@ -67,6 +70,26 @@ class RiskEngine:
 
     def get_position_qty(self, symbol: str) -> int:
         return int(self.positions_qty.get(symbol, 0))
+
+    # ------------------------------------------------------------------ #
+    # Convenience helpers for order flow
+    # ------------------------------------------------------------------ #
+    def calc_signed_notional(self, side: str, price, qty) -> float:
+        """Return signed notional given side/price/qty."""
+        p = _to_float(price)
+        q = _to_int(qty)
+        if p <= 0 or q <= 0:
+            return 0.0
+        sign = 1.0 if str(side).upper() == "BUY" else -1.0
+        return sign * p * q
+
+    def seats_available(self, max_positions: int) -> bool:
+        """
+        Returns True if opening a new symbol would not exceed `max_positions`.
+        A symbol with zero qty is not counted as open.
+        """
+        open_syms = sum(1 for q in self.positions_qty.values() if int(q) != 0)
+        return open_syms < int(max_positions)
 
     # ------------------------------------------------------------------ #
     # Checks
@@ -92,8 +115,7 @@ class RiskEngine:
 
     def _check_price_band(self, ltp_f: float, limit_f: float) -> Tuple[bool, str]:
         """
-        Check that the limit price is within the configured price band buffer
-        around LTP (in basis points).
+        Ensure limit price is within a band around LTP (bps buffer).
         """
         if not (math.isfinite(ltp_f) and math.isfinite(limit_f)) or ltp_f <= 0.0 or limit_f <= 0.0:
             return False, f"invalid prices (ltp={ltp_f}, limit={limit_f})"
@@ -102,7 +124,6 @@ class RiskEngine:
         upper = ltp_f * (1.0 + buffer_bps / 10000.0)
         lower = ltp_f * (1.0 - buffer_bps / 10000.0)
 
-        # Use scalar comparisons only
         if limit_f > upper or limit_f < lower:
             return False, (
                 f"limit price {limit_f} outside [{lower}, {upper}] "
@@ -126,52 +147,78 @@ class RiskEngine:
             return False, f"rate limit error: {e}"
 
     # ------------------------------------------------------------------ #
-    # Public gate
+    # Public gates
     # ------------------------------------------------------------------ #
-    def pre_trade_checks(self, symbol: str, notional, ltp, limit_price) -> Tuple[bool, str]:
+    def pre_trade_checks(
+        self,
+        symbol: str,
+        notional,
+        ltp,
+        limit_price,
+    ) -> Tuple[bool, str]:
         """
         Run all pre-trade checks; return (allowed, reason).
-        All numeric inputs are coerced to floats to avoid pandas Series ambiguity.
+        All numeric inputs are coerced to floats to avoid pandas/NumPy ambiguity.
         """
-        # Coerce to scalars (avoid pandas Series / numpy arrays)
-        try:
-            notional_f = float(notional if notional is not None else 0.0)
-        except Exception:
-            notional_f = 0.0
-        try:
-            ltp_f = float(ltp if ltp is not None else 0.0)
-        except Exception:
-            ltp_f = 0.0
-        try:
-            limit_f = float(limit_price if limit_price is not None else 0.0)
-        except Exception:
-            limit_f = 0.0
+        notional_f = _to_float(notional)
+        ltp_f = _to_float(ltp)
+        limit_f = _to_float(limit_price)
 
         if ltp_f <= 0.0:
             return False, "Invalid LTP (<= 0)."
         if limit_f <= 0.0:
             return False, "Invalid limit price (<= 0)."
-        if notional_f <= 0.0:
-            return False, "Invalid notional (<= 0)."
+        if notional_f == 0.0:
+            return False, "Invalid notional (== 0)."
 
-        # symbol whitelist
         ok, reason = self._check_symbol_whitelist(symbol)
         if not ok:
             return False, reason
 
-        # exposure limits
         ok, reason = self._check_exposure_limits(symbol, notional_f)
         if not ok:
             return False, reason
 
-        # price band validation
         ok, reason = self._check_price_band(ltp_f, limit_f)
         if not ok:
             return False, reason
 
-        # rate limit
         ok, reason = self._check_rate_limit()
         if not ok:
             return False, reason
 
         return True, ""
+
+    def allow_order(
+        self,
+        symbol: str,
+        side: str,
+        qty,
+        ltp,
+        limit_price,
+        *,
+        check_positions_cap: Optional[int] = None,
+    ) -> Tuple[bool, str, float]:
+        """
+        Convenience wrapper for order managers.
+
+        Returns (allowed, reason, signed_notional).
+
+        - Computes signed notional from side/ltp/qty.
+        - Applies pre-trade checks.
+        - Optionally enforces a max open positions cap (`check_positions_cap`).
+        """
+        qty_i = _to_int(qty)
+        if qty_i <= 0:
+            return False, "qty must be > 0", 0.0
+
+        ltp_f = _to_float(ltp)
+        limit_f = _to_float(limit_price)
+        signed_notional = self.calc_signed_notional(side, ltp_f, qty_i)
+
+        # optional cap on number of concurrent symbols
+        if check_positions_cap is not None and not self.seats_available(check_positions_cap):
+            return False, f"max open positions reached ({check_positions_cap})", signed_notional
+
+        ok, reason = self.pre_trade_checks(symbol, signed_notional, ltp_f, limit_f)
+        return ok, reason, signed_notional
