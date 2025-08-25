@@ -1,7 +1,0 @@
-kiteconnect
-Flask
-python-dotenv
-PyYAML
-pandas
-numpy
-yfinance
