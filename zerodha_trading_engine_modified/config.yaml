@@ -1,0 +1,26 @@
+env: LIVE         # SIM or LIVE
+
+
+broker:
+  name: "Zerodha"
+  api_key: ""         # keep empty here; put real value in .env
+  api_secret: ""      # keep empty here; put real value in .env
+  rate_limit_per_sec: 3
+
+marketdata:
+  source: "broker_ws"
+  symbols: []         # <- leave empty; we'll load universe from CSV via env
+
+risk:
+  max_portfolio_value: 500000
+  per_symbol_cap: 100000
+  sector_cap_pct: 30
+  min_adv_pct: 0.5
+  price_band_buffer_bps: 30
+
+stops:
+  atr_multiple_init: 2.0
+  atr_multiple_trail: 1.5
+
+monitoring:
+  alert_email: "shrutikdhoak01@gmail.com"
