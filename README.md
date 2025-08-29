@@ -113,3 +113,14 @@ All signals pass through the pre‑trade gate before being executed.
 Trading involves risk of substantial loss.  This project does not take
 responsibility for financial outcomes.  Always back‑test and paper‑trade
 before going live and ensure compliance with SEBI regulations.
+
+Git Hub code to use to work
+
+cd C:\Users\shrut\DemoAlgo
+code .
+
+Git Hub code to Save the work
+
+git add .
+git commit -m "Describe your change"
+git push origin main
