@@ -124,3 +124,175 @@ Git Hub code to Save the work
 git add .
 git commit -m "Describe your change"
 git push origin main
+
+Backtest strategy (🔹 Strategy Used: Breakout + Momentum Swing Trading
+
+The backtest is not a generic SMA/EMA crossover — it’s a high-probability breakout strategy with multiple technical filters.
+
+1. Entry Logic (when to BUY)
+
+For each stock:
+
+Breakout filter
+
+Price > 20-day high (HH20) or > 50-day high (HH50).
+
+Momentum filter
+
+ADX > ADX_MIN (default 20) → ensures a trending market.
+
+RSI filter
+
+RSI(7), RSI(14), RSI(21) all > RSI_MIN_ALL (default 40) → avoids weak momentum.
+
+Volume filter
+
+Today’s Volume > VOL_MULT × avg20 (default 1.5× average volume).
+
+Scoring system
+
+Ranks candidates by a weighted score of breakout strength, ADX, and RSI.
+
+Only top candidates are selected (max MAX_POSITIONS, default 5).
+
+Risk sizing
+
+Position size = min(cash budget, ATR-based risk cap).
+
+Risk per trade limited by PER_TRADE_RISK (default ₹1000).
+
+2. Exit Logic (when to SELL)
+
+Each position is monitored daily:
+
+Stop-loss:
+
+ATR-based stop (price – ATR_STOP_MULT × ATR).
+
+Target:
+
+ATR-based target (price + ATR_TGT_MULT × ATR).
+
+Trailing:
+
+Both stop and target trail with price as ATR changes.
+
+Other exit conditions:
+
+Price falls below 20-day SMA.
+
+RSI(14) < RSI_EXIT_BELOW (default 30).
+
+Forced exit:
+
+All positions closed on last day of backtest.
+
+3. Risk & Portfolio Controls
+
+Max capital deployed: MAX_INVESTED (default ₹5000 of ₹10000).
+
+Max positions: MAX_POSITIONS (default 5).
+
+Slippage + fees:
+
+0.10% slippage + 0.03% fees per side.
+
+4. Indicators Used
+
+ATR (Average True Range) → for position sizing + stop/target.
+
+ADX → ensures trend strength.
+
+RSI(7,14,21) → momentum confirmation.
+
+HH20 & HH50 → breakout levels.
+
+SMA20 → exit condition.
+
+Volume filter → avoid false breakouts.)
+
+🔹 Strategy Used: Breakout + Momentum Swing Trading
+
+The backtest is not a generic SMA/EMA crossover — it’s a high-probability breakout strategy with multiple technical filters.
+
+1. Entry Logic (when to BUY)
+
+For each stock:
+
+Breakout filter
+
+Price > 20-day high (HH20) or > 50-day high (HH50).
+
+Momentum filter
+
+ADX > ADX_MIN (default 20) → ensures a trending market.
+
+RSI filter
+
+RSI(7), RSI(14), RSI(21) all > RSI_MIN_ALL (default 40) → avoids weak momentum.
+
+Volume filter
+
+Today’s Volume > VOL_MULT × avg20 (default 1.5× average volume).
+
+Scoring system
+
+Ranks candidates by a weighted score of breakout strength, ADX, and RSI.
+
+Only top candidates are selected (max MAX_POSITIONS, default 5).
+
+Risk sizing
+
+Position size = min(cash budget, ATR-based risk cap).
+
+Risk per trade limited by PER_TRADE_RISK (default ₹1000).
+
+2. Exit Logic (when to SELL)
+
+Each position is monitored daily:
+
+Stop-loss:
+
+ATR-based stop (price – ATR_STOP_MULT × ATR).
+
+Target:
+
+ATR-based target (price + ATR_TGT_MULT × ATR).
+
+Trailing:
+
+Both stop and target trail with price as ATR changes.
+
+Other exit conditions:
+
+Price falls below 20-day SMA.
+
+RSI(14) < RSI_EXIT_BELOW (default 30).
+
+Forced exit:
+
+All positions closed on last day of backtest.
+
+3. Risk & Portfolio Controls
+
+Max capital deployed: MAX_INVESTED (default ₹5000 of ₹10000).
+
+Max positions: MAX_POSITIONS (default 5).
+
+Slippage + fees:
+
+0.10% slippage + 0.03% fees per side.
+
+4. Indicators Used
+
+ATR (Average True Range) → for position sizing + stop/target.
+
+ADX → ensures trend strength.
+
+RSI(7,14,21) → momentum confirmation.
+
+HH20 & HH50 → breakout levels.
+
+SMA20 → exit condition.
+
+Volume filter → avoid false breakouts.
