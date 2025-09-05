@@ -121,7 +121,8 @@ def fetch_ohlc(symbol: str) -> Optional[pd.DataFrame]:
     """
     try:
         import yfinance as yf
-        tries, last_err = 3, None
+        tries = 3
+        last_err: Optional[Exception] = None
         for i in range(tries):
             try:
                 if START_DATE or END_DATE:
@@ -228,6 +229,9 @@ class Position:
     last_close: float
 
 def size_position(cash_avail: float, price: float, atr_val: float) -> int:
+    cash_avail = float(cash_avail)
+    price = float(price)
+    atr_val = float(atr_val)
     if price <= 0 or atr_val <= 0 or cash_avail <= 0:
         return 0
     risk_per_share = ATR_STOP_MULT * atr_val
@@ -294,7 +298,7 @@ def backtest(symbols: List[str]) -> Tuple[pd.DataFrame, pd.DataFrame]:
         # evaluate only at step (daily by default)
         if di % max(1, EVAL_STEP_DAYS) != 0:
             # MTM only
-            mtm = sum((data_map[s].loc[dt, "Close"] * p.qty) for s, p in positions.items() if dt in data_map[s].index)
+            mtm = sum((float(data_map[s].loc[dt, "Close"]) * p.qty) for s, p in positions.items() if dt in data_map[s].index)
             equity = cash + mtm
             equity_curve.append({"date": dt, "equity": equity, "cash": cash, "mtm": mtm, "positions": len(positions)})
             continue
@@ -339,7 +343,7 @@ def backtest(symbols: List[str]) -> Tuple[pd.DataFrame, pd.DataFrame]:
         # 2) entries (respect caps & notional)
         open_slots = max(0, MAX_POSITIONS - len(positions))
         if open_slots > 0:
-            invested_now = sum((data_map[s].loc[dt, "Close"] * p.qty) for s, p in positions.items() if dt in data_map[s].index)
+            invested_now = sum((float(data_map[s].loc[dt, "Close"]) * p.qty) for s, p in positions.items() if dt in data_map[s].index)
             remaining_budget = max(0.0, MAX_INVESTED - invested_now)
             if remaining_budget > 0 and cash > 0:
                 # build candidates
@@ -355,7 +359,7 @@ def backtest(symbols: List[str]) -> Tuple[pd.DataFrame, pd.DataFrame]:
                     hh20, hh50   = float(row["HH20"]), float(row["HH50"])
                     v, vavg      = float(row["Volume"]), float(row["VOLAVG20"])
 
-                    if _any_nan(c, a14, adxv, r7, r14, r21, hh20, hh50, v, vavg):
+                    if _any_nan(float(c), float(a14), float(adxv), float(r7), float(r14), float(r21), float(hh20), float(hh50), float(v), float(vavg)):
                         continue
                     if v < VOL_MULT * vavg:
                         continue
@@ -425,7 +429,7 @@ def backtest(symbols: List[str]) -> Tuple[pd.DataFrame, pd.DataFrame]:
                     remaining_budget -= notional
 
         # 3) mark-to-market equity
-        mtm = sum((data_map[s].loc[dt, "Close"] * p.qty) for s, p in positions.items() if dt in data_map[s].index)
+        mtm = sum((float(data_map[s].loc[dt, "Close"]) * p.qty) for s, p in positions.items() if dt in data_map[s].index)
         equity = cash + mtm
         equity_curve.append({"date": dt, "equity": equity, "cash": cash, "mtm": mtm, "positions": len(positions)})
 

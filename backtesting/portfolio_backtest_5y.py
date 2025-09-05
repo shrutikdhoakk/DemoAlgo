@@ -277,7 +277,7 @@ def run_backtest():
         for tkr, adx_val, px_close, px_high, px_low in cands:
             if len(positions) >= MAX_POS:
                 break
-            qty = size_position(px_close, equity)
+            qty = size_position(float(px_close), float(equity))
             if qty <= 0:  # not enough risk budget/cash
                 continue
             notional = qty * px_close
