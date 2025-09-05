@@ -1,4 +1,6 @@
-date,equity,cash,mtm,positions
+git add .
+git commit -m "Describe your change"
+git push origin maindate,equity,cash,mtm,positions
 2024-08-30 00:00:00+05:30,10000.0,10000.0,0.0,0
 2024-09-02 00:00:00+05:30,10000.0,10000.0,0.0,0
 2024-09-03 00:00:00+05:30,10000.0,10000.0,0.0,0
